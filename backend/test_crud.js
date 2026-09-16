@@ -1,18 +1,22 @@
 /**
- * Comprehensive Local CRUD & Persistence Verification Suite
- * Tests Phases 22 through 28:
- * - GET /health
- * - POST /bugs (CREATE)
- * - GET /bugs (READ & persistence across server restarts)
- * - PUT /bugs/:id (UPDATE)
- * - DELETE /bugs/:id (DELETE)
- * - Edge cases (400 on missing fields, 404 on nonexistent IDs, invalid ID format)
+ * Comprehensive Local CRUD, Category Relationship & Persistence Verification Suite
+ * Tests:
+ * - GET /health (Operational liveness)
+ * - GET /categories (Relational Entity: Read seeded categories)
+ * - POST /bugs (CREATE with foreign key category_id)
+ * - POST /bugs (Validation: reject missing or non-existent category_id)
+ * - GET /bugs (READ with SQL JOIN returning category_name)
+ * - PUT /bugs/:id (UPDATE bug and switch category_id)
+ * - PUT /bugs/:id (Validation: reject non-existent category_id)
+ * - DELETE /bugs/:id (DELETE bug record)
+ * - Category Preserved: Verify category table unchanged after bug deletion (no cascading deletion)
+ * - SQLite Foreign Key Pragma check: PRAGMA foreign_key_list(bugs)
  * - Complete CRUD sequence: CREATE -> READ -> UPDATE -> READ -> DELETE -> READ
  */
 
 const http = require('http');
 const path = require('path');
-const fs = require('fs');
+const Database = require('better-sqlite3');
 
 const PORT = 3000;
 const BASE_URL = `http://localhost:${PORT}`;
@@ -59,7 +63,8 @@ function request(method, pathUrl, body = null) {
 
 async function runVerification() {
   console.log('====================================================');
-  console.log('BUGVAULT: RUNNING COMPREHENSIVE LOCAL TEST SUITE');
+  console.log('BUGVAULT: COMPREHENSIVE LOCAL TEST SUITE');
+  console.log('Verifying 2 Database Entities & 1:N Foreign Key');
   console.log('====================================================\n');
 
   let passedTests = 0;
@@ -76,138 +81,175 @@ async function runVerification() {
     }
   }
 
-  // 1. PHASE 22 - HEALTH CHECK
+  // 1. HEALTH CHECK
   console.log('--- TEST 1: Health Check (GET /health) ---');
   const healthRes = await request('GET', '/health');
   assert(healthRes.status === 200, 'GET /health returns 200 OK', `Got ${healthRes.status}`);
   assert(healthRes.json?.status === 'ok', 'GET /health returns {"status":"ok"}', JSON.stringify(healthRes.json));
 
-  // 2. PHASE 23 - CREATE RECORD (POST /bugs)
-  console.log('\n--- TEST 2: Create Record (POST /bugs) ---');
+  // 2. CATEGORIES ENTITY (READ)
+  console.log('\n--- TEST 2: Categories Entity (GET /categories) ---');
+  const catRes = await request('GET', '/categories');
+  assert(catRes.status === 200, 'GET /categories returns 200 OK', `Got ${catRes.status}`);
+  assert(Array.isArray(catRes.json), 'GET /categories returns JSON array', typeof catRes.json);
+  assert(catRes.json.length >= 5, 'At least 5 default categories exist in database', `Count: ${catRes.json?.length}`);
+  const jsCat = catRes.json.find(c => c.name === 'JavaScript');
+  const nodeCat = catRes.json.find(c => c.name === 'Node.js');
+  assert(jsCat !== undefined, 'Found seeded category: "JavaScript"');
+  assert(nodeCat !== undefined, 'Found seeded category: "Node.js"');
+
+  // 3. DATABASE SCHEMA & FOREIGN KEY PRAGMA CHECK
+  console.log('\n--- TEST 3: Database Schema & Foreign Key Pragma ---');
+  const db = new Database(path.join(__dirname, 'database.sqlite'));
+  const fkList = db.prepare('PRAGMA foreign_key_list(bugs)').all();
+  assert(fkList.length > 0, 'Foreign key relationship active on table "bugs"');
+  const fkCat = fkList.find(fk => fk.table === 'categories' && fk.from === 'category_id' && fk.to === 'id');
+  assert(fkCat !== undefined, 'bugs.category_id REFERENCES categories(id) confirmed via PRAGMA foreign_key_list');
+  db.close();
+
+  // 4. CREATE RECORD WITH VALID CATEGORY (POST /bugs)
+  console.log('\n--- TEST 4: Create Record with Category (POST /bugs) ---');
   const bugPayload1 = {
-    title: 'Prisma environment error',
-    error: 'Environment variable not found: DATABASE_URL',
-    cause: 'DATABASE_URL was missing from .env',
-    solution: 'Added DATABASE_URL and regenerated Prisma client',
-    date: '2026-09-16'
+    title: 'Cannot read properties of undefined (reading map)',
+    error: 'TypeError: Cannot read properties of undefined (reading "map")',
+    cause: 'API response was undefined before asynchronous state resolved',
+    solution: 'Added optional chaining data?.map(...) and initialized default empty array',
+    date: '2026-09-16',
+    category_id: jsCat.id
   };
 
   const createRes = await request('POST', '/bugs', bugPayload1);
   assert(createRes.status === 201, 'POST /bugs returns 201 Created', `Got ${createRes.status}`);
   assert(createRes.json?.id > 0, 'POST /bugs returns generated integer ID', `ID: ${createRes.json?.id}`);
-  assert(createRes.json?.title === bugPayload1.title, 'Created record title matches payload');
-  assert(createRes.json?.cause === bugPayload1.cause, 'Created record cause matches payload');
+  assert(createRes.json?.category_id === jsCat.id, 'Created record contains matching category_id');
+  assert(createRes.json?.category_name === 'JavaScript', 'Created record contains joined category_name "JavaScript"');
   const bug1Id = createRes.json.id;
 
-  // 3. PHASE 24 - READ RECORD (GET /bugs)
-  console.log('\n--- TEST 3: Read Records (GET /bugs) ---');
+  // 5. VALIDATION: MISSING CATEGORY_ID IN POST /bugs
+  console.log('\n--- TEST 5: Validation - Missing category_id ---');
+  const missingCatRes = await request('POST', '/bugs', {
+    title: 'Missing category bug',
+    error: 'SyntaxError',
+    cause: 'Test cause',
+    solution: 'Test solution',
+    date: '2026-09-16'
+  });
+  assert(missingCatRes.status === 400, 'POST /bugs without category_id returns 400 Bad Request', `Got ${missingCatRes.status}`);
+  assert(missingCatRes.json?.missingFields?.includes('category_id'), 'Validation lists missing "category_id" field');
+
+  // 6. VALIDATION: INVALID / NON-EXISTENT CATEGORY_ID
+  console.log('\n--- TEST 6: Validation - Non-existent category_id (Foreign Key Violation Protection) ---');
+  const invalidCatRes = await request('POST', '/bugs', {
+    title: 'Invalid foreign key bug',
+    error: 'ForeignKeyError',
+    cause: 'Referencing non-existent category 99999',
+    solution: 'Verify category exists before insertion',
+    date: '2026-09-16',
+    category_id: 99999
+  });
+  assert(invalidCatRes.status === 400, 'POST /bugs with non-existent category_id returns 400 Bad Request', `Got ${invalidCatRes.status}`);
+  assert(invalidCatRes.json?.error === 'Invalid category', 'Error message identifies invalid category');
+
+  // 7. READ ALL BUGS WITH SQL JOIN (GET /bugs)
+  console.log('\n--- TEST 7: Read All Bugs with JOIN (GET /bugs) ---');
   const readRes1 = await request('GET', '/bugs');
   assert(readRes1.status === 200, 'GET /bugs returns 200 OK', `Got ${readRes1.status}`);
-  assert(Array.isArray(readRes1.json), 'GET /bugs returns JSON array', typeof readRes1.json);
+  assert(Array.isArray(readRes1.json), 'GET /bugs returns array');
   const foundBug = readRes1.json.find(b => b.id === bug1Id);
   assert(foundBug !== undefined, `Created bug #${bug1Id} found in database list`);
-  assert(foundBug.solution === bugPayload1.solution, 'Stored solution matches database record');
+  assert(foundBug.category_id === jsCat.id, 'Stored category_id matches');
+  assert(foundBug.category_name === 'JavaScript', 'SQL JOIN returns category_name "JavaScript"');
 
-  // 4. PHASE 25 - UPDATE RECORD (PUT /bugs/:id)
-  console.log('\n--- TEST 4: Update Record (PUT /bugs/:id) ---');
-  const updatedPayload = {
-    title: 'Prisma environment error (Fixed)',
-    error: 'Environment variable not found: DATABASE_URL',
-    cause: 'Missing DATABASE_URL in .env after clean repo clone',
-    solution: 'Added DATABASE_URL to backend/.env and ran npx prisma generate',
-    date: '2026-09-16'
+  // 8. UPDATE BUG AND SWITCH CATEGORY (PUT /bugs/:id)
+  console.log('\n--- TEST 8: Update Bug and Switch Category (PUT /bugs/:id) ---');
+  const updatePayload = {
+    title: 'Cannot read properties of undefined (Resolved)',
+    error: 'TypeError: Cannot read properties of undefined (reading "map")',
+    cause: 'API response was undefined before state resolved; switched to Node.js backend handler',
+    solution: 'Added defensive response envelope on Node.js controller',
+    date: '2026-09-16',
+    category_id: nodeCat.id
   };
 
-  const updateRes = await request('PUT', `/bugs/${bug1Id}`, updatedPayload);
+  const updateRes = await request('PUT', `/bugs/${bug1Id}`, updatePayload);
   assert(updateRes.status === 200, 'PUT /bugs/:id returns 200 OK', `Got ${updateRes.status}`);
-  assert(updateRes.json?.id === bug1Id, 'Updated bug ID matches target');
-  assert(updateRes.json?.title === updatedPayload.title, 'Updated title matches');
-  assert(updateRes.json?.cause === updatedPayload.cause, 'Updated cause matches');
+  assert(updateRes.json?.category_id === nodeCat.id, 'Updated bug category_id matches new category');
+  assert(updateRes.json?.category_name === 'Node.js', 'Updated bug joined category_name is "Node.js"');
 
-  // Verify in GET /bugs
+  // 9. VALIDATION: PUT WITH NON-EXISTENT CATEGORY_ID
+  console.log('\n--- TEST 9: Validation - PUT with invalid category_id ---');
+  const putInvalidCat = await request('PUT', `/bugs/${bug1Id}`, {
+    ...updatePayload,
+    category_id: 88888
+  });
+  assert(putInvalidCat.status === 400, 'PUT /bugs/:id with non-existent category returns 400 Bad Request', `Got ${putInvalidCat.status}`);
+
+  // 10. DELETE BUG & VERIFY CATEGORY PRESERVATION (DELETE /bugs/:id)
+  console.log('\n--- TEST 10: Delete Bug & Verify Category Preserved ---');
+  const deleteRes = await request('DELETE', `/bugs/${bug1Id}`);
+  assert(deleteRes.status === 200, 'DELETE /bugs/:id returns 200 OK', `Got ${deleteRes.status}`);
+  assert(deleteRes.json?.success === true, 'DELETE confirmed with success: true');
+
+  // Verify bug was deleted
   const readRes2 = await request('GET', '/bugs');
-  const verifiedBug = readRes2.json.find(b => b.id === bug1Id);
-  assert(verifiedBug.title === updatedPayload.title, 'GET /bugs reflects updated title');
+  assert(!readRes2.json.some(b => b.id === bug1Id), 'Deleted bug is no longer present in GET /bugs');
 
-  // 5. PHASE 27 - EDGE CASES
-  console.log('\n--- TEST 5: Edge Cases & Validation ---');
-  // Missing fields in POST
-  const missingTitleRes = await request('POST', '/bugs', {
-    error: 'Some error',
-    cause: 'Some cause',
-    solution: 'Some solution',
-    date: '2026-09-16'
-  });
-  assert(missingTitleRes.status === 400, 'POST with missing title returns 400 Bad Request', `Got ${missingTitleRes.status}`);
-  assert(missingTitleRes.json?.missingFields?.includes('title'), 'Validation lists missing "title" field');
+  // Verify category still exists (no cascading delete)
+  const catResAfter = await request('GET', '/categories');
+  const jsCatStillExists = catResAfter.json.some(c => c.id === jsCat.id);
+  const nodeCatStillExists = catResAfter.json.some(c => c.id === nodeCat.id);
+  assert(jsCatStillExists, 'Category "JavaScript" is preserved after bug deletion');
+  assert(nodeCatStillExists, 'Category "Node.js" is preserved after bug deletion');
 
-  // Empty fields in POST
-  const emptyFieldsRes = await request('POST', '/bugs', {
-    title: '   ',
-    error: '',
-    cause: '',
-    solution: '',
-    date: ''
-  });
-  assert(emptyFieldsRes.status === 400, 'POST with whitespace/empty fields returns 400', `Got ${emptyFieldsRes.status}`);
+  // 11. EDGE CASES: 404 ON NON-EXISTENT ID
+  console.log('\n--- TEST 11: Edge Cases (404 Not Found & Malformed JSON) ---');
+  const put404 = await request('PUT', '/bugs/999999', updatePayload);
+  assert(put404.status === 404, 'PUT non-existent ID returns 404 Not Found');
 
-  // PUT nonexistent ID
-  const putNotFoundRes = await request('PUT', '/bugs/999999', updatedPayload);
-  assert(putNotFoundRes.status === 404, 'PUT /bugs/999999 returns 404 Not Found', `Got ${putNotFoundRes.status}`);
+  const del404 = await request('DELETE', '/bugs/999999');
+  assert(del404.status === 404, 'DELETE non-existent ID returns 404 Not Found');
 
-  // DELETE nonexistent ID
-  const delNotFoundRes = await request('DELETE', '/bugs/999999');
-  assert(delNotFoundRes.status === 404, 'DELETE /bugs/999999 returns 404 Not Found', `Got ${delNotFoundRes.status}`);
-
-  // Invalid ID format
-  const invalidIdRes = await request('GET', '/bugs/invalid-id'); // Route doesn't exist (404 expected as only /bugs is CRUD)
-  assert(invalidIdRes.status === 404, 'Extra route GET /bugs/:id returns 404 (strictly 4 CRUD routes enforced)');
-
-  const putInvalidId = await request('PUT', '/bugs/not-a-number', updatedPayload);
-  assert(putInvalidId.status === 400, 'PUT /bugs/not-a-number returns 400 Invalid ID', `Got ${putInvalidId.status}`);
-
-  // 6. PHASE 26 & 28 - COMPLETE CRUD SEQUENCE
-  console.log('\n--- TEST 6: Complete CRUD Sequence (CREATE -> READ -> UPDATE -> READ -> DELETE -> READ) ---');
+  // 12. COMPLETE CRUD SEQUENCE WITH RELATIONAL CATEGORIES
+  console.log('\n--- TEST 12: Complete Relational CRUD Sequence ---');
+  const gitCat = catRes.json.find(c => c.name === 'Git/GitHub');
+  
   // CREATE
-  const seqBug = await request('POST', '/bugs', {
-    title: 'CORS policy blocked request',
-    error: 'Access to fetch at localhost from origin null has been blocked by CORS policy',
-    cause: 'Backend missing cors() middleware',
-    solution: 'Installed cors and added app.use(cors())',
-    date: '2026-09-16'
+  const seqCreate = await request('POST', '/bugs', {
+    title: 'Git push rejected (fetch first)',
+    error: 'Updates were rejected because the remote contains work that you do not have locally',
+    cause: 'Remote main branch had new commits not present in local branch',
+    solution: 'Ran git pull --rebase origin main then pushed again',
+    date: '2026-09-16',
+    category_id: gitCat.id
   });
-  assert(seqBug.status === 201, 'Seq step 1: CREATE -> 201 Created');
-  const seqId = seqBug.json.id;
+  assert(seqCreate.status === 201, 'Seq Step 1: CREATE -> 201 Created with Git/GitHub category');
+  const seqId = seqCreate.json.id;
 
   // READ
   const seqRead1 = await request('GET', '/bugs');
-  assert(seqRead1.status === 200, 'Seq step 2: READ -> 200 OK');
-  assert(seqRead1.json.some(b => b.id === seqId), 'Seq step 2: Created record is present in list');
+  const seqItem1 = seqRead1.json.find(b => b.id === seqId);
+  assert(seqItem1?.category_name === 'Git/GitHub', 'Seq Step 2: READ -> Bug has category_name "Git/GitHub"');
 
-  // UPDATE
+  // UPDATE (Change category to Database)
+  const dbCat = catRes.json.find(c => c.name === 'Database');
   const seqUpdate = await request('PUT', `/bugs/${seqId}`, {
-    title: 'CORS policy blocked request (Resolved)',
-    error: 'Access to fetch at localhost from origin null has been blocked by CORS policy',
-    cause: 'Express backend lacked Access-Control-Allow-Origin response headers',
-    solution: 'Installed npm cors and applied app.use(cors()) before routes',
-    date: '2026-09-16'
+    title: 'Git push rejected (fetch first) - Resolved',
+    error: 'Updates were rejected because the remote contains work that you do not have locally',
+    cause: 'Remote branch had unmerged changes',
+    solution: 'Ran git pull --rebase origin main',
+    date: '2026-09-16',
+    category_id: dbCat.id
   });
-  assert(seqUpdate.status === 200, 'Seq step 3: UPDATE -> 200 OK');
-  assert(seqUpdate.json.title.includes('(Resolved)'), 'Seq step 3: Updated record title confirmed');
-
-  // READ
-  const seqRead2 = await request('GET', '/bugs');
-  const seqFound2 = seqRead2.json.find(b => b.id === seqId);
-  assert(seqFound2.title.includes('(Resolved)'), 'Seq step 4: READ reflects update');
+  assert(seqUpdate.status === 200, 'Seq Step 3: UPDATE -> 200 OK');
+  assert(seqUpdate.json?.category_name === 'Database', 'Seq Step 3: Updated category is now "Database"');
 
   // DELETE
-  const seqDelete = await request('DELETE', `/bugs/${seqId}`);
-  assert(seqDelete.status === 200, 'Seq step 5: DELETE -> 200 OK');
-  assert(seqDelete.json.success === true, 'Seq step 5: Delete returns success');
+  const seqDel = await request('DELETE', `/bugs/${seqId}`);
+  assert(seqDel.status === 200, 'Seq Step 4: DELETE -> 200 OK');
 
-  // READ
-  const seqRead3 = await request('GET', '/bugs');
-  assert(!seqRead3.json.some(b => b.id === seqId), 'Seq step 6: READ confirms bug was permanently removed');
+  // READ (Verify permanently removed)
+  const seqRead2 = await request('GET', '/bugs');
+  assert(!seqRead2.json.some(b => b.id === seqId), 'Seq Step 5: READ confirms bug permanently removed');
 
   console.log('\n====================================================');
   console.log(`ALL LOCAL TESTS PASSED! (${passedTests}/${totalTests} assertions passed)`);

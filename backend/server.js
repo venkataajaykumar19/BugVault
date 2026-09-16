@@ -17,10 +17,26 @@ app.use(express.json());
 const dbPath = path.join(__dirname, 'database.sqlite');
 const db = new Database(dbPath);
 
-// Enable WAL mode for better concurrency and persistence
+// Enable foreign key constraints and WAL mode
+db.pragma('foreign_keys = ON');
 db.pragma('journal_mode = WAL');
 
-// Automatic database table migration on startup
+// 1. Create categories table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE
+  )
+`);
+
+// 2. Seed default categories if empty
+const defaultCategories = ['JavaScript', 'React', 'Node.js', 'Database', 'Git/GitHub'];
+const insertCatStmt = db.prepare('INSERT OR IGNORE INTO categories (name) VALUES (?)');
+for (const cat of defaultCategories) {
+  insertCatStmt.run(cat);
+}
+
+// 3. Create or migrate bugs table with foreign key to categories
 db.exec(`
   CREATE TABLE IF NOT EXISTS bugs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,26 +44,51 @@ db.exec(`
     error TEXT NOT NULL,
     cause TEXT NOT NULL,
     solution TEXT NOT NULL,
-    date TEXT NOT NULL
+    date TEXT NOT NULL,
+    category_id INTEGER,
+    FOREIGN KEY (category_id) REFERENCES categories(id)
   )
 `);
 
+// Safe migration check: add category_id column if it doesn't exist yet
+const tableInfo = db.prepare('PRAGMA table_info(bugs)').all();
+const hasCategoryId = tableInfo.some(col => col.name === 'category_id');
+if (!hasCategoryId) {
+  db.exec('ALTER TABLE bugs ADD COLUMN category_id INTEGER REFERENCES categories(id)');
+  // Assign a default category to any pre-existing records without category_id
+  const defaultCat = db.prepare("SELECT id FROM categories WHERE name = 'Database'").get() ||
+                     db.prepare("SELECT id FROM categories LIMIT 1").get();
+  if (defaultCat) {
+    db.prepare('UPDATE bugs SET category_id = ? WHERE category_id IS NULL').run(defaultCat.id);
+  }
+}
+
 // Prepared statements for maximum performance and SQL injection prevention
 const insertBugStmt = db.prepare(`
-  INSERT INTO bugs (title, error, cause, solution, date)
-  VALUES (@title, @error, @cause, @solution, @date)
+  INSERT INTO bugs (title, error, cause, solution, date, category_id)
+  VALUES (@title, @error, @cause, @solution, @date, @category_id)
 `);
 
 const selectAllBugsStmt = db.prepare(`
-  SELECT id, title, error, cause, solution, date
-  FROM bugs
-  ORDER BY id DESC
+  SELECT b.id, b.title, b.error, b.cause, b.solution, b.date, b.category_id, c.name AS category_name
+  FROM bugs b
+  LEFT JOIN categories c ON b.category_id = c.id
+  ORDER BY b.id DESC
 `);
 
 const selectBugByIdStmt = db.prepare(`
-  SELECT id, title, error, cause, solution, date
-  FROM bugs
-  WHERE id = ?
+  SELECT b.id, b.title, b.error, b.cause, b.solution, b.date, b.category_id, c.name AS category_name
+  FROM bugs b
+  LEFT JOIN categories c ON b.category_id = c.id
+  WHERE b.id = ?
+`);
+
+const selectCategoryByIdStmt = db.prepare(`
+  SELECT id, name FROM categories WHERE id = ?
+`);
+
+const selectAllCategoriesStmt = db.prepare(`
+  SELECT id, name FROM categories ORDER BY id ASC
 `);
 
 const updateBugStmt = db.prepare(`
@@ -56,7 +97,8 @@ const updateBugStmt = db.prepare(`
       error = @error,
       cause = @cause,
       solution = @solution,
-      date = @date
+      date = @date,
+      category_id = @category_id
   WHERE id = @id
 `);
 
@@ -66,20 +108,36 @@ const deleteBugStmt = db.prepare(`
 `);
 
 // ==========================================
-// HEALTH ROUTE
+// OPERATIONAL ROUTE: HEALTH CHECK
 // ==========================================
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
 // ==========================================
-// EXACT FOUR CRUD ROUTES
+// READ-ONLY ROUTE: CATEGORIES
+// ==========================================
+app.get('/categories', (req, res) => {
+  try {
+    const categories = selectAllCategoriesStmt.all();
+    return res.status(200).json(categories);
+  } catch (err) {
+    console.error('Error fetching categories:', err.message);
+    return res.status(500).json({
+      error: 'Failed to fetch categories',
+      message: 'A database error occurred while retrieving categories.'
+    });
+  }
+});
+
+// ==========================================
+// EXACT FOUR APPLICATION CRUD ROUTES
 // ==========================================
 
-// 1. POST /bugs - Create a new bug entry
+// 1. POST /bugs - Create a new bug entry with category
 app.post('/bugs', (req, res) => {
   try {
-    const { title, error, cause, solution, date } = req.body || {};
+    const { title, error, cause, solution, date, category_id } = req.body || {};
 
     // Validation: all fields are required and must be non-empty strings
     const missingFields = [];
@@ -88,6 +146,7 @@ app.post('/bugs', (req, res) => {
     if (!cause || typeof cause !== 'string' || !cause.trim()) missingFields.push('cause');
     if (!solution || typeof solution !== 'string' || !solution.trim()) missingFields.push('solution');
     if (!date || typeof date !== 'string' || !date.trim()) missingFields.push('date');
+    if (category_id === undefined || category_id === null || category_id === '') missingFields.push('category_id');
 
     if (missingFields.length > 0) {
       return res.status(400).json({
@@ -97,12 +156,30 @@ app.post('/bugs', (req, res) => {
       });
     }
 
+    const parsedCategoryId = parseInt(category_id, 10);
+    if (isNaN(parsedCategoryId) || parsedCategoryId <= 0) {
+      return res.status(400).json({
+        error: 'Invalid category ID',
+        message: 'category_id must be a valid positive integer.'
+      });
+    }
+
+    // Verify category exists in foreign table
+    const category = selectCategoryByIdStmt.get(parsedCategoryId);
+    if (!category) {
+      return res.status(400).json({
+        error: 'Invalid category',
+        message: `Category with ID ${parsedCategoryId} does not exist.`
+      });
+    }
+
     const info = insertBugStmt.run({
       title: title.trim(),
       error: error.trim(),
       cause: cause.trim(),
       solution: solution.trim(),
-      date: date.trim()
+      date: date.trim(),
+      category_id: parsedCategoryId
     });
 
     const newBug = selectBugByIdStmt.get(info.lastInsertRowid);
@@ -116,7 +193,7 @@ app.post('/bugs', (req, res) => {
   }
 });
 
-// 2. GET /bugs - Retrieve all bug records
+// 2. GET /bugs - Retrieve all bug records with category information
 app.get('/bugs', (req, res) => {
   try {
     const bugs = selectAllBugsStmt.all();
@@ -130,7 +207,7 @@ app.get('/bugs', (req, res) => {
   }
 });
 
-// 3. PUT /bugs/:id - Update an existing bug record
+// 3. PUT /bugs/:id - Update an existing bug record and category
 app.put('/bugs/:id', (req, res) => {
   try {
     const bugId = parseInt(req.params.id, 10);
@@ -150,7 +227,7 @@ app.put('/bugs/:id', (req, res) => {
       });
     }
 
-    const { title, error, cause, solution, date } = req.body || {};
+    const { title, error, cause, solution, date, category_id } = req.body || {};
 
     // Validate update fields
     const missingFields = [];
@@ -159,6 +236,7 @@ app.put('/bugs/:id', (req, res) => {
     if (!cause || typeof cause !== 'string' || !cause.trim()) missingFields.push('cause');
     if (!solution || typeof solution !== 'string' || !solution.trim()) missingFields.push('solution');
     if (!date || typeof date !== 'string' || !date.trim()) missingFields.push('date');
+    if (category_id === undefined || category_id === null || category_id === '') missingFields.push('category_id');
 
     if (missingFields.length > 0) {
       return res.status(400).json({
@@ -168,13 +246,31 @@ app.put('/bugs/:id', (req, res) => {
       });
     }
 
+    const parsedCategoryId = parseInt(category_id, 10);
+    if (isNaN(parsedCategoryId) || parsedCategoryId <= 0) {
+      return res.status(400).json({
+        error: 'Invalid category ID',
+        message: 'category_id must be a valid positive integer.'
+      });
+    }
+
+    // Verify category exists in foreign table
+    const category = selectCategoryByIdStmt.get(parsedCategoryId);
+    if (!category) {
+      return res.status(400).json({
+        error: 'Invalid category',
+        message: `Category with ID ${parsedCategoryId} does not exist.`
+      });
+    }
+
     updateBugStmt.run({
       id: bugId,
       title: title.trim(),
       error: error.trim(),
       cause: cause.trim(),
       solution: solution.trim(),
-      date: date.trim()
+      date: date.trim(),
+      category_id: parsedCategoryId
     });
 
     const updatedBug = selectBugByIdStmt.get(bugId);
@@ -188,7 +284,7 @@ app.put('/bugs/:id', (req, res) => {
   }
 });
 
-// 4. DELETE /bugs/:id - Delete a bug record
+// 4. DELETE /bugs/:id - Delete a bug record (Category is preserved)
 app.delete('/bugs/:id', (req, res) => {
   try {
     const bugId = parseInt(req.params.id, 10);
@@ -242,6 +338,7 @@ app.use((err, req, res, next) => {
 const server = app.listen(PORT, () => {
   console.log(`BugVault API Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Categories endpoint: http://localhost:${PORT}/categories`);
   console.log(`Bugs endpoint: http://localhost:${PORT}/bugs`);
 });
 
