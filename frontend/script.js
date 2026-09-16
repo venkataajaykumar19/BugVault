@@ -1,6 +1,7 @@
 /**
  * BugVault Frontend Application Logic
  * Implements full CRUD lifecycle: POST, GET, PUT, DELETE with SQLite backend.
+ * Supports relational categories: One Category has Many Bugs.
  */
 
 // Production & Local Backend URL configuration
@@ -16,6 +17,7 @@ const BACKEND_URL = isLocal
 
 // State variables
 let bugs = [];
+let categories = [];
 let editingBugId = null;
 let isSubmitting = false;
 
@@ -23,6 +25,7 @@ let isSubmitting = false;
 const bugForm = document.getElementById('bug-form');
 const bugIdInput = document.getElementById('bug-id');
 const bugTitleInput = document.getElementById('bug-title');
+const bugCategorySelect = document.getElementById('bug-category');
 const bugErrorInput = document.getElementById('bug-error');
 const bugCauseInput = document.getElementById('bug-cause');
 const bugSolutionInput = document.getElementById('bug-solution');
@@ -116,6 +119,34 @@ async function checkBackendHealth() {
 }
 
 /**
+ * Fetch categories from GET /categories and populate the dropdown
+ */
+async function fetchCategories() {
+  try {
+    const res = await fetch(`${BACKEND_URL}/categories`);
+    if (res.ok) {
+      categories = await res.json();
+      renderCategoryOptions(categories);
+    }
+  } catch (err) {
+    console.error('Failed to load categories:', err);
+  }
+}
+
+/**
+ * Render category options in dropdown
+ */
+function renderCategoryOptions(catList) {
+  bugCategorySelect.innerHTML = '<option value="">Select category</option>';
+  catList.forEach(cat => {
+    const opt = document.createElement('option');
+    opt.value = cat.id;
+    opt.textContent = cat.name;
+    bugCategorySelect.appendChild(opt);
+  });
+}
+
+/**
  * READ FLOW: Fetch all bugs from GET /bugs
  */
 async function fetchBugs() {
@@ -163,12 +194,15 @@ function renderBugsList(bugList) {
     card.className = `bug-card ${editingBugId === bug.id ? 'editing' : ''}`;
     card.id = `bug-card-${bug.id}`;
 
+    const categoryLabel = bug.category_name || 'Uncategorized';
+
     card.innerHTML = `
       <div class="bug-card-header">
         <div class="bug-card-title-group">
           <h3 class="bug-title" id="bug-title-${bug.id}">${escapeHtml(bug.title)}</h3>
           <div class="bug-meta">
             <span class="bug-id-tag">#${bug.id}</span>
+            <span class="bug-category-tag">🏷️ ${escapeHtml(categoryLabel)}</span>
             <span class="bug-date">📅 Encountered: ${escapeHtml(bug.date)}</span>
           </div>
         </div>
@@ -226,18 +260,19 @@ bugForm.addEventListener('submit', async (e) => {
 
   // Extract form inputs
   const title = bugTitleInput.value.trim();
+  const categoryId = parseInt(bugCategorySelect.value, 10);
   const error = bugErrorInput.value.trim();
   const cause = bugCauseInput.value.trim();
   const solution = bugSolutionInput.value.trim();
   const date = bugDateInput.value.trim();
 
   // Validate fields
-  if (!title || !error || !cause || !solution || !date) {
-    showAlert('Please fill in all required fields.', 'error');
+  if (!title || !error || !cause || !solution || !date || isNaN(categoryId) || categoryId <= 0) {
+    showAlert('Please fill in all required fields and select a valid category.', 'error');
     return;
   }
 
-  const bugData = { title, error, cause, solution, date };
+  const bugData = { title, error, cause, solution, date, category_id: categoryId };
 
   isSubmitting = true;
 
@@ -310,6 +345,7 @@ function startEdit(id) {
   editingBugId = id;
   bugIdInput.value = bug.id;
   bugTitleInput.value = bug.title;
+  bugCategorySelect.value = bug.category_id || '';
   bugErrorInput.value = bug.error;
   bugCauseInput.value = bug.cause;
   bugSolutionInput.value = bug.solution;
@@ -337,6 +373,7 @@ function resetForm() {
   editingBugId = null;
   bugIdInput.value = '';
   bugForm.reset();
+  bugCategorySelect.value = '';
   setDefaultDate();
 
   formHeading.textContent = 'Record New Bug';
@@ -403,11 +440,18 @@ function escapeHtml(str) {
 }
 
 // Event Listeners
-refreshBtn.addEventListener('click', fetchBugs);
-retryBtn.addEventListener('click', fetchBugs);
+refreshBtn.addEventListener('click', async () => {
+  await fetchCategories();
+  await fetchBugs();
+});
+retryBtn.addEventListener('click', async () => {
+  await fetchCategories();
+  await fetchBugs();
+});
 
 // Window load initialization
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   setDefaultDate();
-  fetchBugs();
+  await fetchCategories();
+  await fetchBugs();
 });
