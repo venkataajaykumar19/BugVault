@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BugVault — Personal Bug Log</title>
+  <meta name="description" content="BugVault is a web app for recording and reviewing coding errors, their causes, and the solutions that fixed them.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-area">
+        <div class="logo-icon">🐛</div>
+        <div>
+          <h1 id="app-title">BugVault</h1>
+          <p class="subtitle" id="app-subtitle">Save the errors you've solved so you don't have to solve them twice.</p>
+        </div>
+      </div>
+      <div class="badge-area">
+        <span class="badge" id="backend-status-badge">Checking connection...</span>
+      </div>
+    </header>
+
+    <!-- Global Alert / Notification Banner -->
+    <div id="alert-banner" class="alert-banner hidden" role="alert" aria-live="polite"></div>
+
+    <main class="main-content">
+      <!-- Left / Top Column: Bug Entry & Edit Form -->
+      <section class="form-section">
+        <div class="card form-card">
+          <div class="card-header">
+            <h2 id="form-heading">Record New Bug</h2>
+            <span id="form-mode-indicator" class="mode-badge mode-create">New Entry</span>
+          </div>
+
+          <form id="bug-form" novalidate>
+            <input type="hidden" id="bug-id" value="">
+
+            <div class="form-group">
+              <label for="bug-title">Bug Title <span class="required">*</span></label>
+              <input 
+                type="text" 
+                id="bug-title" 
+                placeholder="e.g., Prisma environment error" 
+                required 
+                autocomplete="off"
+              >
+              <small class="form-hint">A concise summary of the issue</small>
+            </div>
+
+            <div class="form-group">
+              <label for="bug-error">Error Message / Symptom <span class="required">*</span></label>
+              <textarea 
+                id="bug-error" 
+                rows="3" 
+                placeholder="e.g., Environment variable not found: DATABASE_URL" 
+                required
+              ></textarea>
+              <small class="form-hint">The exact error code, log trace, or visual symptom</small>
+            </div>
+
+            <div class="form-group">
+              <label for="bug-cause">Root Cause <span class="required">*</span></label>
+              <textarea 
+                id="bug-cause" 
+                rows="3" 
+                placeholder="e.g., DATABASE_URL was missing from .env after fresh git clone" 
+                required
+              ></textarea>
+              <small class="form-hint">Why did this error happen in the first place?</small>
+            </div>
+
+            <div class="form-group">
+              <label for="bug-solution">Solution / Fix <span class="required">*</span></label>
+              <textarea 
+                id="bug-solution" 
+                rows="3" 
+                placeholder="e.g., Added DATABASE_URL to backend/.env and ran npx prisma generate" 
+                required
+              ></textarea>
+              <small class="form-hint">How did you resolve it? Steps or code changes</small>
+            </div>
+
+            <div class="form-group">
+              <label for="bug-date">Date Encountered <span class="required">*</span></label>
+              <input 
+                type="date" 
+                id="bug-date" 
+                required
+              >
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" id="submit-btn" class="btn btn-primary">
+                <span id="submit-btn-text">Save Bug Record</span>
+              </button>
+              <button type="button" id="cancel-btn" class="btn btn-secondary hidden">
+                Cancel Edit
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- Right / Bottom Column: Bug Log Entries List -->
+      <section class="list-section">
+        <div class="list-header">
+          <div class="list-title-group">
+            <h2>Saved Bug Solutions</h2>
+            <span class="count-badge" id="bug-count">0 records</span>
+          </div>
+          <button id="refresh-btn" class="btn btn-icon" title="Refresh bug list">
+            🔄 Refresh
+          </button>
+        </div>
+
+        <!-- Loading State -->
+        <div id="loading-state" class="state-container hidden">
+          <div class="spinner"></div>
+          <p id="loading-message">Loading bugs...</p>
+        </div>
+
+        <!-- Error State -->
+        <div id="error-state" class="state-container error-state hidden">
+          <div class="error-icon">⚠️</div>
+          <h3 id="error-title">Unable to connect</h3>
+          <p id="error-detail">Unable to connect to the server. Please check that the backend is running.</p>
+          <button id="retry-btn" class="btn btn-secondary">Try Again</button>
+        </div>
+
+        <!-- Empty State -->
+        <div id="empty-state" class="state-container empty-state hidden">
+          <div class="empty-icon">📂</div>
+          <h3>No bugs recorded yet</h3>
+          <p>When you encounter and solve an error, record it on the left so you can easily reference it later.</p>
+        </div>
+
+        <!-- Bug Records Container -->
+        <div id="bugs-container" class="bugs-grid"></div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>BugVault — Built for Kalvium Personal CRUD App Assignment &bull; Persisted via SQLite</p>
+    </footer>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
